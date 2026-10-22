@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Check-in</title>
+<style>
+  :root { --ok:#1a9e4b; --err:#c62828; --warn:#e69100; --bg:#111; --fg:#fff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); min-height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; }
+  h1 { font-size:1.1rem; margin:0; }
+  button { font:inherit; padding:10px 14px; border:0; border-radius:8px; background:#333; color:var(--fg); }
+  #reader { width:100%; max-width:480px; margin:0 auto; }
+  #resultado { margin:16px; padding:24px 16px; border-radius:12px; text-align:center; background:#222; font-size:1.3rem; min-height:110px; transition:background .15s; }
+  #resultado.ok { background:var(--ok); }
+  #resultado.error { background:var(--err); }
+  #resultado.espera { background:var(--warn); }
+  #resultado small { display:block; margin-top:8px; font-size:.9rem; opacity:.85; }
+  #config { display:none; padding:16px; max-width:480px; margin:0 auto; }
+  #config label { display:block; margin:12px 0 4px; }
+  #config input { width:100%; padding:10px; border-radius:8px; border:0; font:inherit; }
+  #contador { padding:0 16px 16px; text-align:center; opacity:.7; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Check-in</h1>
+  <button id="btnConfig">Ajustes</button>
+</header>
+
+<section id="config">
+  <label for="url">URL del webhook (termina en /exec)</label>
+  <input id="url" type="url" placeholder="https://script.google.com/macros/s/.../exec">
+  <label for="token">Token</label>
+  <input id="token" type="password" autocomplete="off">
+  <p><button id="btnGuardar">Guardar y escanear</button></p>
+</section>
+
+<main id="scanner">
+  <div id="reader"></div>
+  <div id="resultado">Apunta la cámara al QR</div>
+  <div id="contador"></div>
+</main>
+
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+};
+
+let scanner = null;
+let procesando = false;
+let ultimo = { id: '', t: 0 };
+let aprobados = 0;
+
+function mostrar(clase, texto, detalle) {
+  const r = $('resultado');
+  r.className = clase;
+  r.textContent = texto;
+  if (detalle) {
+    const s = document.createElement('small');
+    s.textContent = detalle;
+    r.appendChild(s);
+  }
+}
+
+function aviso(ok) {
+  try { navigator.vibrate && navigator.vibrate(ok ? 120 : [200, 80, 200]); } catch (e) {}
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    o.frequency.value = ok ? 880 : 220;
+    o.connect(ctx.destination);
+    o.start();
+    o.stop(ctx.currentTime + (ok ? 0.12 : 0.4));
+  } catch (e) {}
+}
+
+async function validar(id) {
+  const url = store.get('url'), token = store.get('token');
+  if (!url || !token) { abrirConfig(); return; }
+
+  // Mismo QR en menos de 4 s: es el mismo escaneo, se ignora
+  const ahora = Date.now();
+  if (id === ultimo.id && ahora - ultimo.t < 4000) return;
+  ultimo = { id, t: ahora };
+  if (procesando) return;
+  procesando = true;
+  mostrar('espera', 'Validando…');
+
+  try {
+    // Form-urlencoded es una "solicitud simple": evita el preflight CORS, que Apps Script no soporta
+    const resp = await fetch(url, {
+      method: 'POST',
+      body: new URLSearchParams({ id, token }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      aprobados++;
+      $('contador').textContent = 'Ingresos en este dispositivo: ' + aprobados;
+      mostrar('ok', '✔ ' + (data.nombre || 'Ingreso OK'), data.mensaje);
+    } else {
+      mostrar('error', '✖ ' + data.mensaje, data.nombre || '');
+    }
+    aviso(!!data.ok);
+  } catch (e) {
+    mostrar('error', 'Sin conexión o URL incorrecta', 'No se registró. Reintenta el escaneo.');
+    aviso(false);
+    ultimo = { id: '', t: 0 };
+  } finally {
+    procesando = false;
+  }
+}
+
+function iniciar() {
+  if (scanner) return;
+  scanner = new Html5Qrcode('reader');
+  scanner.start(
+    { facingMode: 'environment' },
+    { fps: 10, qrbox: { width: 250, height: 250 } },
+    (texto) => validar(texto.trim()),
+    () => {}
+  ).catch(() => mostrar('error', 'No se pudo abrir la cámara', 'Revisa los permisos del navegador (se requiere HTTPS).'));
+}
+
+function detener() {
+  if (!scanner) return Promise.resolve();
+  const s = scanner;
+  scanner = null;
+  return s.stop().then(() => s.clear()).catch(() => {});
+}
+
+function abrirConfig() {
+  detener();
+  $('url').value = store.get('url');
+  $('token').value = store.get('token');
+  $('config').style.display = 'block';
+  $('scanner').style.display = 'none';
+}
+
+$('btnConfig').onclick = abrirConfig;
+$('btnGuardar').onclick = () => {
+  store.set('url', $('url').value.trim());
+  store.set('token', $('token').value.trim());
+  $('config').style.display = 'none';
+  $('scanner').style.display = 'block';
+  iniciar();
+};
+
+if (store.get('url') && store.get('token')) iniciar(); else abrirConfig();
+</script>
+</body>
+</html>
