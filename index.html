@@ -56,6 +56,18 @@ let procesando = false;
 let ultimo = { id: '', t: 0 };
 let aprobados = 0;
 
+let temporizador = null;
+const SEGUNDOS_REINICIO = 5;
+
+// Tras SEGUNDOS_REINICIO la pantalla vuelve sola al estado de espera
+function programarReinicio() {
+  clearTimeout(temporizador);
+  temporizador = setTimeout(() => {
+    ultimo = { id: '', t: 0 };
+    mostrar('', 'Apunta la cámara al QR');
+  }, SEGUNDOS_REINICIO * 1000);
+}
+
 function mostrar(clase, texto, detalle) {
   const r = $('resultado');
   r.className = clase;
@@ -89,13 +101,19 @@ async function validar(id) {
   ultimo = { id, t: ahora };
   if (procesando) return;
   procesando = true;
+  clearTimeout(temporizador);
   mostrar('espera', 'Validando…');
+
+  // Si Google no responde en 8 s se corta, para que el escáner nunca quede trabado
+  const corte = new AbortController();
+  const limite = setTimeout(() => corte.abort(), 8000);
 
   try {
     // Form-urlencoded es una "solicitud simple": evita el preflight CORS, que Apps Script no soporta
     const resp = await fetch(url, {
       method: 'POST',
       body: new URLSearchParams({ id, token }),
+      signal: corte.signal,
     });
     const data = await resp.json();
     if (data.ok) {
@@ -111,7 +129,9 @@ async function validar(id) {
     aviso(false);
     ultimo = { id: '', t: 0 };
   } finally {
+    clearTimeout(limite);
     procesando = false;
+    programarReinicio();
   }
 }
 
